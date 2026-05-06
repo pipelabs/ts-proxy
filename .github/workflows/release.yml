@@ -1,0 +1,191 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Get latest tag
+        id: get_latest_tag
+        run: |
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "Latest tag: $LATEST_TAG"
+
+      - name: Determine next version
+        id: next_version
+        run: |
+          LATEST_TAG="${{ steps.get_latest_tag.outputs.latest_tag }}"
+          VERSION=${LATEST_TAG#v}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+
+          if git rev-parse "${LATEST_TAG}" >/dev/null 2>&1; then
+            COMMITS=$(git log ${LATEST_TAG}..HEAD --pretty=%B)
+          else
+            COMMITS=$(git log --pretty=%B)
+          fi
+
+          if echo "$COMMITS" | grep -qE "^(BREAKING CHANGE:|feat!:|fix!:)"; then
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+          elif echo "$COMMITS" | grep -qE "^feat(\(.*\))?:"; then
+            MINOR=$((MINOR + 1))
+            PATCH=0
+          else
+            PATCH=$((PATCH + 1))
+          fi
+
+          NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Next version: $NEW_VERSION"
+
+      - name: Create dist directory
+        run: mkdir -p dist
+
+      - name: Build Linux AMD64
+        env:
+          VERSION: ${{ steps.next_version.outputs.new_version }}
+        run: |
+          MODULE_NAME=$(grep '^module ' go.mod | awk '{print $2}')
+          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          LDFLAGS="-X 'main.Version=${VERSION}' -X 'main.BuildTime=${BUILD_TIME}' -X 'main.GitCommit=${GIT_COMMIT}' -X 'main.ModuleName=${MODULE_NAME}'"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o "dist/ts-proxy-${VERSION}-linux-amd64" .
+          cd dist
+          tar -czf "ts-proxy-${VERSION}-linux-amd64.tar.gz" "ts-proxy-${VERSION}-linux-amd64"
+
+      - name: Build macOS ARM64
+        env:
+          VERSION: ${{ steps.next_version.outputs.new_version }}
+        run: |
+          MODULE_NAME=$(grep '^module ' go.mod | awk '{print $2}')
+          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          LDFLAGS="-X 'main.Version=${VERSION}' -X 'main.BuildTime=${BUILD_TIME}' -X 'main.GitCommit=${GIT_COMMIT}' -X 'main.ModuleName=${MODULE_NAME}'"
+          GOOS=darwin GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o "dist/ts-proxy-${VERSION}-mac-arm64" .
+          cd dist
+          tar -czf "ts-proxy-${VERSION}-mac-arm64.tar.gz" "ts-proxy-${VERSION}-mac-arm64"
+
+      - name: Build macOS AMD64
+        env:
+          VERSION: ${{ steps.next_version.outputs.new_version }}
+        run: |
+          MODULE_NAME=$(grep '^module ' go.mod | awk '{print $2}')
+          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          LDFLAGS="-X 'main.Version=${VERSION}' -X 'main.BuildTime=${BUILD_TIME}' -X 'main.GitCommit=${GIT_COMMIT}' -X 'main.ModuleName=${MODULE_NAME}'"
+          GOOS=darwin GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o "dist/ts-proxy-${VERSION}-mac-amd64" .
+          cd dist
+          tar -czf "ts-proxy-${VERSION}-mac-amd64.tar.gz" "ts-proxy-${VERSION}-mac-amd64"
+
+      - name: Build Windows AMD64
+        env:
+          VERSION: ${{ steps.next_version.outputs.new_version }}
+        run: |
+          MODULE_NAME=$(grep '^module ' go.mod | awk '{print $2}')
+          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          LDFLAGS="-X 'main.Version=${VERSION}' -X 'main.BuildTime=${BUILD_TIME}' -X 'main.GitCommit=${GIT_COMMIT}' -X 'main.ModuleName=${MODULE_NAME}'"
+          GOOS=windows GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o "dist/ts-proxy-${VERSION}-windows-amd64.exe" .
+          cd dist
+          zip "ts-proxy-${VERSION}-windows-amd64.zip" "ts-proxy-${VERSION}-windows-amd64.exe"
+
+      - name: Generate checksums
+        env:
+          VERSION: ${{ steps.next_version.outputs.new_version }}
+        run: |
+          cd dist
+          sha256sum *.tar.gz *.zip > checksums-${VERSION}.txt
+          cat checksums-${VERSION}.txt
+
+      - name: Create Git Tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a ${{ steps.next_version.outputs.new_version }} -m "Release ${{ steps.next_version.outputs.new_version }}"
+          git push origin ${{ steps.next_version.outputs.new_version }}
+
+      - name: Generate Release Notes
+        run: |
+          LATEST_TAG="${{ steps.get_latest_tag.outputs.latest_tag }}"
+          NEW_VERSION="${{ steps.next_version.outputs.new_version }}"
+
+          echo "## What's Changed" > release_notes.md
+          echo "" >> release_notes.md
+
+          if git rev-parse "${LATEST_TAG}" >/dev/null 2>&1; then
+            git log ${LATEST_TAG}..HEAD --pretty=format:"- %s (%h)" >> release_notes.md
+          else
+            echo "Initial release." >> release_notes.md
+            echo "" >> release_notes.md
+            echo "### Commits in this release:" >> release_notes.md
+            git log --pretty=format:"- %s (%h)" >> release_notes.md
+          fi
+
+          echo "" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "## Installation" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "Download the appropriate binary for your platform and extract it:" >> release_notes.md
+          echo "" >> release_notes.md
+          echo '```bash' >> release_notes.md
+          echo "# Linux" >> release_notes.md
+          echo "wget https://github.com/\$GITHUB_REPOSITORY/releases/download/${NEW_VERSION}/ts-proxy-${NEW_VERSION}-linux-amd64.tar.gz" >> release_notes.md
+          echo "tar -xzf ts-proxy-${NEW_VERSION}-linux-amd64.tar.gz" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "# macOS (Apple Silicon)" >> release_notes.md
+          echo "wget https://github.com/\$GITHUB_REPOSITORY/releases/download/${NEW_VERSION}/ts-proxy-${NEW_VERSION}-mac-arm64.tar.gz" >> release_notes.md
+          echo "tar -xzf ts-proxy-${NEW_VERSION}-mac-arm64.tar.gz" >> release_notes.md
+          echo '```' >> release_notes.md
+
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.next_version.outputs.new_version }}
+          name: Release ${{ steps.next_version.outputs.new_version }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums-${{ steps.next_version.outputs.new_version }}.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Summary
+        run: |
+          echo "## Release Created Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ steps.next_version.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Built Artifacts:" >> $GITHUB_STEP_SUMMARY
+          echo "- Linux AMD64" >> $GITHUB_STEP_SUMMARY
+          echo "- macOS ARM64 (Apple Silicon)" >> $GITHUB_STEP_SUMMARY
+          echo "- macOS AMD64 (Intel)" >> $GITHUB_STEP_SUMMARY
+          echo "- Windows AMD64" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "View the release at: https://github.com/${{ github.repository }}/releases/tag/${{ steps.next_version.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
