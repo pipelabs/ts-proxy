@@ -119,6 +119,21 @@ go build -o ts-proxy .
 ./build.sh
 ```
 
+### Docker
+
+Release builds also publish a container image to GitHub Container Registry:
+
+```bash
+docker run --rm \
+  -e TS_PROXY_AUTH_KEY=tskey-auth-... \
+  -e TS_PROXY_HOSTNAME=client-services-proxy \
+  -e TS_PROXY_MAPPINGS="5432=postgres.tailnet.ts.net:5432" \
+  -v ts-proxy-state:/var/lib/ts-proxy/tsnet-state \
+  ghcr.io/pipelabs/ts-proxy:latest
+```
+
+The image runs as a non-root user and stores tsnet state in `/var/lib/ts-proxy/tsnet-state`.
+
 ## Deployment
 
 1. Copy the binary to the machine that will run the proxy.
