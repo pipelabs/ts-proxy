@@ -1,0 +1,11 @@
+# .github/workflows/security.yml
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  secret-scan:
+    uses: pipelabs/tooling/.github/workflows/secret-scan.yml@main
