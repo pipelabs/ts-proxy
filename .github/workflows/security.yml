@@ -1,0 +1,12 @@
+name: Security
+
+on:
+  # deliberately unfiltered: `branches:` on a pull_request trigger matches the
+  # base branch, so filtering to main skips every PR stacked on a feature branch
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  secret-scan:
+    uses: pipelabs/tooling/.github/workflows/secret-scan.yml@main
