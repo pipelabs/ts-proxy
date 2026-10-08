@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"tailscale.com/ipn"
 	"tailscale.com/tsnet"
@@ -32,6 +34,7 @@ type Config struct {
 	AdvertiseTags []string
 	AcceptRoutes  bool
 	LocalBindAddr string
+	HealthAddr    string
 	Mappings      []Mapping
 }
 
@@ -44,6 +47,9 @@ type Server struct {
 	config    Config
 	tsnet     *tsnet.Server
 	listeners []net.Listener
+	health    *http.Server
+	backend   backendState
+	fatal     chan error
 	wg        sync.WaitGroup
 }
 
@@ -61,7 +67,7 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	server := &Server{config: config}
+	server := &Server{config: config, fatal: make(chan error, 1)}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -69,9 +75,16 @@ func main() {
 		log.Fatalf("failed to start proxy: %v", err)
 	}
 
-	<-ctx.Done()
-	log.Println("shutdown requested")
-	server.Shutdown()
+	select {
+	case <-ctx.Done():
+		log.Println("shutdown requested")
+		server.Shutdown()
+	case err := <-server.Fatal():
+		log.Printf("fatal: %v", err)
+		stop()
+		server.Shutdown()
+		os.Exit(1)
+	}
 }
 
 func loadConfigFromEnv() (Config, error) {
@@ -89,6 +102,8 @@ func loadConfigFromEnv() (Config, error) {
 	if localBindAddr == "" {
 		localBindAddr = defaultLocalBindAddr
 	}
+
+	healthAddr := strings.TrimSpace(os.Getenv("TS_PROXY_HEALTH_ADDR"))
 
 	mappings, err := parseMappings(os.Getenv("TS_PROXY_MAPPINGS"))
 	if err != nil {
@@ -117,6 +132,7 @@ func loadConfigFromEnv() (Config, error) {
 		AdvertiseTags: advertiseTags,
 		AcceptRoutes:  acceptRoutes,
 		LocalBindAddr: localBindAddr,
+		HealthAddr:    healthAddr,
 		Mappings:      mappings,
 	}, nil
 }
@@ -307,6 +323,16 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	log.Printf("accept routes: %t", s.config.AcceptRoutes)
 
+	if err := s.watchBackendState(ctx); err != nil {
+		s.Shutdown()
+		return err
+	}
+
+	if err := s.startHealthServer(ctx); err != nil {
+		s.Shutdown()
+		return err
+	}
+
 	for _, mapping := range s.config.Mappings {
 		if err := s.startMapping(ctx, mapping); err != nil {
 			s.Shutdown()
@@ -411,6 +437,14 @@ func (s *Server) handleConnection(ctx context.Context, clientConn net.Conn, mapp
 }
 
 func (s *Server) Shutdown() {
+	if s.health != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.health.Shutdown(shutdownCtx); err != nil {
+			log.Printf("failed to close health server: %v", err)
+		}
+	}
+
 	for _, listener := range s.listeners {
 		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			log.Printf("failed to close listener %s: %v", listener.Addr(), err)

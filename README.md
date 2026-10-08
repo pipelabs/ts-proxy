@@ -23,6 +23,7 @@ Configuration is via environment variables:
 - `TS_PROXY_STATE_DIR` controls where tsnet stores its node identity. Defaults to `./tsnet-state`.
 - `TS_PROXY_LOCAL_ADDR` controls the local bind address for matching local listeners. Defaults to `127.0.0.1`; use `0.0.0.0` to expose on all local network interfaces.
 - `TS_PROXY_ACCEPT_ROUTES` controls whether the proxy accepts subnet routes advertised by other Tailnet nodes. Defaults to `true`.
+- `TS_PROXY_HEALTH_ADDR` is optional. When set (for example `0.0.0.0:9000`), serves `GET /healthz` on that address: `200` while the Tailscale backend is `Running`, `503` otherwise. Use it as a Kubernetes liveness probe.
 - `TS_PROXY_AUTH_KEY` or `TS_AUTHKEY` is optional. This can be a Tailscale auth key or OAuth client secret. When omitted, first run prints a Tailscale login URL.
 - `TS_PROXY_ADVERTISE_TAGS` is optional. Use comma, semicolon, or newline-separated tags such as `tag:ci,tag:proxy`.
 - `TS_PROXY_AUTH_EPHEMERAL` is optional. When set, appends the OAuth auth-key parameter `ephemeral=true|false`.
@@ -145,6 +146,8 @@ On first run without `TS_AUTHKEY`, the process prints a Tailscale authentication
 
 The `tsnet-state` directory should be persisted across restarts so the proxy keeps the same Tailscale identity.
 
+The process exits with status 1 when the Tailscale backend reaches `NeedsLogin`, `NeedsMachineAuth` or `Stopped`, which happens when the device is deleted from the admin console or its key expires. Run it under a supervisor (Kubernetes, systemd `Restart=always`, Docker `--restart`) with an auth key set so it re-registers on restart.
+
 ## Mapping Examples
 
 PostgreSQL:
@@ -207,6 +210,10 @@ go build ./...
 - Confirm the mapping listen port is present in `TS_PROXY_MAPPINGS`.
 - Confirm the target service is reachable from inside the Tailnet.
 - Check Tailscale ACLs allow the client to reach the proxy port.
+
+### Process Exits With `tailscale node is NeedsLogin`
+
+The node was removed from the Tailnet or its key expired. With `TS_PROXY_AUTH_KEY` set, a restart re-registers it. Without a key, the next run prints a login URL. An OAuth client secret with `TS_PROXY_AUTH_EPHEMERAL=true` avoids key expiry and removes the node automatically when the proxy stops.
 
 ### Hostname Changed
 
